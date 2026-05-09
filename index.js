@@ -1,6 +1,7 @@
 const express = require('express');
 const admin = require('firebase-admin');
 const cors = require('cors');
+const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 
 const app = express();
@@ -23,6 +24,7 @@ const serviceAccount = {
 
 // Check if we're in development mode (no Firebase)
 let db = null;
+let auth = null;
 let isFirebaseInitialized = false;
 
 try {
@@ -31,6 +33,7 @@ try {
             credential: admin.credential.cert(serviceAccount),
         });
         db = admin.firestore();
+        auth = admin.auth();
         isFirebaseInitialized = true;
         console.log('✅ Firebase initialized successfully');
     } else {
@@ -72,6 +75,15 @@ try {
                 })
             })
         };
+        auth = {
+            createUser: async (data) => {
+                console.log('📝 Demo: Creating user:', data);
+                return { uid: 'demo-' + Date.now() };
+            },
+            getUserByEmail: async (email) => {
+                throw new Error('User not found');
+            }
+        };
     }
 } catch (error) {
     console.error('❌ Firebase initialization error:', error.message);
@@ -109,6 +121,147 @@ app.get('/api/health', (req, res) => {
         firebase: isFirebaseInitialized,
         mode: isFirebaseInitialized ? 'production' : 'demo'
     });
+});
+
+// USER SIGNUP - NEW ENDPOINT
+app.post('/api/signup', async (req, res) => {
+    try {
+        const { name, email, password } = req.body;
+        
+        if (!email || !password || !name) {
+            return res.status(400).json({ error: 'All fields required (name, email, password)' });
+        }
+        
+        if (password.length < 6) {
+            return res.status(400).json({ error: 'Password must be at least 6 characters' });
+        }
+        
+        if (!isFirebaseInitialized) {
+            // Demo mode - store in memory/demo
+            console.log(`Demo: Creating user ${email}`);
+            return res.json({ 
+                success: true, 
+                message: 'Demo mode - Account created successfully! Please login.',
+                uid: 'demo-' + Date.now()
+            });
+        }
+        
+        // Check if user already exists
+        try {
+            const existingUser = await auth.getUserByEmail(email);
+            if (existingUser) {
+                return res.status(400).json({ error: 'User already exists with this email' });
+            }
+        } catch (error) {
+            // User doesn't exist, continue
+        }
+        
+        // Create user in Firebase Authentication
+        const userRecord = await auth.createUser({
+            email: email,
+            password: password,
+            displayName: name
+        });
+        
+        // Hash password for local storage (optional)
+        const hashedPassword = await bcrypt.hash(password, 10);
+        
+        // Create user document in Firestore
+        await db.collection('users').doc(userRecord.uid).set({
+            name: name,
+            email: email,
+            password: hashedPassword,
+            createdAt: new Date().toISOString(),
+            uid: userRecord.uid
+        });
+        
+        // Auto-add to subscribers (inactive by default, admin can activate)
+        await db.collection('subscribers').add({
+            email: email,
+            name: name,
+            isActive: false,
+            subscribedAt: new Date().toISOString(),
+            expiryDate: null,
+            uid: userRecord.uid
+        });
+        
+        console.log(`✅ User created: ${email} (${userRecord.uid})`);
+        
+        res.json({ 
+            success: true, 
+            message: 'Account created successfully! Please login.',
+            uid: userRecord.uid
+        });
+        
+    } catch (error) {
+        console.error('Signup error:', error);
+        res.status(400).json({ error: error.message });
+    }
+});
+
+// USER LOGIN - NEW ENDPOINT
+app.post('/api/login', async (req, res) => {
+    try {
+        const { email, password } = req.body;
+        
+        if (!email || !password) {
+            return res.status(400).json({ error: 'Email and password required' });
+        }
+        
+        if (!isFirebaseInitialized) {
+            // Demo mode - check demo credentials
+            const users = JSON.parse(global.demoUsers || '[]');
+            const user = users.find(u => u.email === email && u.password === password);
+            if (user) {
+                const token = jwt.sign({ email, name: user.name }, JWT_SECRET, { expiresIn: '7d' });
+                return res.json({ success: true, token, email, name: user.name });
+            } else if (email === 'demo@example.com' && password === 'demo123') {
+                const token = jwt.sign({ email, name: 'Demo User' }, JWT_SECRET, { expiresIn: '7d' });
+                return res.json({ success: true, token, email, name: 'Demo User' });
+            }
+            return res.status(401).json({ error: 'Invalid email or password' });
+        }
+        
+        // Find user in Firestore
+        const usersRef = db.collection('users');
+        const snapshot = await usersRef.where('email', '==', email).limit(1).get();
+        
+        if (snapshot.empty) {
+            return res.status(401).json({ error: 'Invalid email or password' });
+        }
+        
+        let user = null;
+        let userId = null;
+        snapshot.forEach(doc => {
+            user = doc.data();
+            userId = doc.id;
+        });
+        
+        // Verify password
+        const isValid = await bcrypt.compare(password, user.password);
+        
+        if (!isValid) {
+            return res.status(401).json({ error: 'Invalid email or password' });
+        }
+        
+        // Generate JWT token
+        const token = jwt.sign(
+            { email: user.email, name: user.name, uid: userId },
+            JWT_SECRET,
+            { expiresIn: '7d' }
+        );
+        
+        res.json({
+            success: true,
+            token,
+            email: user.email,
+            name: user.name
+        });
+        
+    } catch (error) {
+        console.error('Login error:', error);
+        res.status(500).json({ error: error.message });
+    }
 });
 
 // Get all articles
@@ -179,7 +332,7 @@ app.get('/api/article/:slug', async (req, res) => {
                     slug: 'creamy-garlic-parmesan-pasta',
                     imageUrl: 'https://images.unsplash.com/photo-1645112411344-0f6e5e5b7f3e?w=800',
                     shortDesc: 'A rich and creamy pasta dish loaded with garlic and parmesan cheese.',
-                    fullContent: 'This creamy garlic parmesan pasta is the ultimate comfort food. Made with simple ingredients, it comes together in just 20 minutes. The sauce is velvety smooth and packed with flavor. Perfect for weeknight dinners or when you need a quick and satisfying meal.\n\nIngredients:\n- 8 oz pasta\n- 4 cloves garlic\n- 1 cup heavy cream\n- 1/2 cup parmesan cheese\n- Salt and pepper to taste\n\nInstructions:\n1. Cook pasta according to package directions\n2. Sauté garlic in butter\n3. Add cream and simmer\n4. Stir in parmesan until smooth\n5. Toss with pasta and serve!',
+                    fullContent: 'This creamy garlic parmesan pasta is the ultimate comfort food. Made with simple ingredients, it comes together in just 20 minutes.\n\nIngredients:\n- 8 oz pasta\n- 4 cloves garlic\n- 1 cup heavy cream\n- 1/2 cup parmesan cheese\n\nInstructions:\n1. Cook pasta\n2. Sauté garlic\n3. Add cream\n4. Stir in parmesan\n5. Serve!',
                     createdAt: new Date().toISOString()
                 },
                 'homemade-margherita-pizza': {
@@ -188,7 +341,7 @@ app.get('/api/article/:slug', async (req, res) => {
                     slug: 'homemade-margherita-pizza',
                     imageUrl: 'https://images.unsplash.com/photo-1604382355076-af4b0eb60143?w=800',
                     shortDesc: 'Classic Italian pizza with fresh basil, mozzarella, and tomato sauce.',
-                    fullContent: 'Nothing beats a homemade Margherita pizza with a crispy crust, fresh mozzarella, and aromatic basil. This recipe will transport you straight to Naples.\n\nIngredients:\n- Pizza dough\n- San Marzano tomatoes\n- Fresh mozzarella\n- Fresh basil leaves\n- Extra virgin olive oil\n\nInstructions:\n1. Preheat oven to 500°F\n2. Stretch the dough\n3. Add crushed tomatoes\n4. Top with mozzarella\n5. Bake until bubbly\n6. Garnish with fresh basil',
+                    fullContent: 'Nothing beats a homemade Margherita pizza.\n\nIngredients:\n- Pizza dough\n- San Marzano tomatoes\n- Fresh mozzarella\n- Fresh basil\n\nInstructions:\n1. Preheat oven to 500°F\n2. Stretch dough\n3. Add toppings\n4. Bake until bubbly',
                     createdAt: new Date().toISOString()
                 }
             };
@@ -271,7 +424,6 @@ app.post('/api/check-subscription', async (req, res) => {
         }
         
         if (!isFirebaseInitialized) {
-            // Demo: return active for demo@example.com
             return res.json({ 
                 isActive: email === 'demo@example.com',
                 expiryDate: email === 'demo@example.com' ? new Date(Date.now() + 30*24*60*60*1000).toISOString() : null
@@ -355,7 +507,7 @@ app.post('/api/ebooks', async (req, res) => {
     }
 });
 
-// Subscribe user
+// Subscribe user (newsletter)
 app.post('/api/subscribe', async (req, res) => {
     try {
         const { email } = req.body;
@@ -388,20 +540,18 @@ app.post('/api/subscribe', async (req, res) => {
     }
 });
 
-// ============ ADMIN LOGIN ROUTE (PLAIN PASSWORD VERSION) ============
+// ============ ADMIN LOGIN ROUTE ============
 app.post('/api/admin/login', async (req, res) => {
     try {
         const { email, password } = req.body;
         
         console.log('Admin login attempt:', { email, hasPassword: !!password });
         
-        // Check if admin email matches
         if (email !== process.env.ADMIN_EMAIL) {
             console.log('Admin login failed: Invalid email');
             return res.status(401).json({ error: 'Invalid email or password' });
         }
         
-        // DIRECT PLAIN PASSWORD COMPARISON (NO HASH)
         const adminPassword = process.env.ADMIN_PASSWORD;
         
         if (!adminPassword) {
@@ -409,7 +559,6 @@ app.post('/api/admin/login', async (req, res) => {
             return res.status(500).json({ error: 'Server configuration error - Missing password' });
         }
         
-        // Simple string comparison
         const isValid = (password === adminPassword);
         
         if (!isValid) {
@@ -417,7 +566,6 @@ app.post('/api/admin/login', async (req, res) => {
             return res.status(401).json({ error: 'Invalid email or password' });
         }
         
-        // Generate JWT token
         const token = jwt.sign(
             { email, role: 'admin' },
             JWT_SECRET,
@@ -677,6 +825,8 @@ app.all('/api/*', (req, res) => {
         method: req.method,
         url: req.url,
         availableEndpoints: [
+            'POST /api/signup',
+            'POST /api/login',
             'POST /api/admin/login',
             'GET /api/health',
             'GET /api/articles',
@@ -705,4 +855,6 @@ app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`📍 Health check: http://localhost:${PORT}/api/health`);
     console.log(`🔐 Admin login: POST http://localhost:${PORT}/api/admin/login`);
+    console.log(`📝 User signup: POST http://localhost:${PORT}/api/signup`);
+    console.log(`🔑 User login: POST http://localhost:${PORT}/api/login`);
 });
