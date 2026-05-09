@@ -152,7 +152,6 @@ app.post('/api/signup', async (req, res) => {
         }
         
         if (!isFirebaseInitialized) {
-            // Demo mode
             const hashedPassword = await bcrypt.hash(password, 10);
             const usersRef = db.collection('users');
             await usersRef.add({
@@ -171,7 +170,6 @@ app.post('/api/signup', async (req, res) => {
             });
         }
         
-        // Check if user already exists
         try {
             const existingUser = await auth.getUserByEmail(email);
             if (existingUser) {
@@ -181,17 +179,14 @@ app.post('/api/signup', async (req, res) => {
             // User doesn't exist, continue
         }
         
-        // Create user in Firebase Authentication
         const userRecord = await auth.createUser({
             email: email,
             password: password,
             displayName: name
         });
         
-        // Hash password for local storage
         const hashedPassword = await bcrypt.hash(password, 10);
         
-        // Create user document in Firestore
         await db.collection('users').doc(userRecord.uid).set({
             name: name,
             email: email,
@@ -200,7 +195,6 @@ app.post('/api/signup', async (req, res) => {
             uid: userRecord.uid
         });
         
-        // Auto-add to subscribers (inactive by default)
         await db.collection('subscribers').add({
             email: email,
             name: name,
@@ -232,7 +226,6 @@ app.post('/api/login', async (req, res) => {
         }
         
         if (!isFirebaseInitialized) {
-            // Demo mode
             const usersRef = db.collection('users');
             const snapshot = await usersRef.where('email', '==', email).limit(1).get();
             
@@ -257,7 +250,6 @@ app.post('/api/login', async (req, res) => {
             return res.json({ success: true, token, email: user.email, name: user.name });
         }
         
-        // Find user in Firestore
         const usersRef = db.collection('users');
         const snapshot = await usersRef.where('email', '==', email).limit(1).get();
         
@@ -272,14 +264,12 @@ app.post('/api/login', async (req, res) => {
             userId = doc.id;
         });
         
-        // Verify password
         const isValid = await bcrypt.compare(password, user.password);
         
         if (!isValid) {
             return res.status(401).json({ error: 'Invalid email or password' });
         }
         
-        // Generate JWT token
         const token = jwt.sign(
             { email: user.email, name: user.name, uid: userId },
             JWT_SECRET,
@@ -299,7 +289,7 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
-// Get all articles
+// Get all articles (with category)
 app.get('/api/articles', async (req, res) => {
     try {
         if (!isFirebaseInitialized) {
@@ -314,6 +304,7 @@ app.get('/api/articles', async (req, res) => {
                     slug: data.slug,
                     imageUrl: data.imageUrl,
                     shortDesc: data.shortDesc,
+                    category: data.category || 'all',
                     createdAt: data.createdAt
                 });
             });
@@ -325,6 +316,7 @@ app.get('/api/articles', async (req, res) => {
                         slug: 'creamy-garlic-parmesan-pasta',
                         imageUrl: 'https://images.unsplash.com/photo-1645112411344-0f6e5e5b7f3e?w=500',
                         shortDesc: 'A rich and creamy pasta dish loaded with garlic and parmesan cheese.',
+                        category: 'dinner',
                         createdAt: new Date().toISOString()
                     },
                     {
@@ -333,6 +325,25 @@ app.get('/api/articles', async (req, res) => {
                         slug: 'homemade-margherita-pizza',
                         imageUrl: 'https://images.unsplash.com/photo-1604382355076-af4b0eb60143?w=500',
                         shortDesc: 'Classic Italian pizza with fresh basil, mozzarella, and tomato sauce.',
+                        category: 'lunch',
+                        createdAt: new Date().toISOString()
+                    },
+                    {
+                        id: '3',
+                        title: 'Fluffy Pancakes',
+                        slug: 'fluffy-pancakes',
+                        imageUrl: 'https://images.unsplash.com/photo-1575853121743-60c24f0a7502?w=500',
+                        shortDesc: 'Light and fluffy pancakes perfect for breakfast.',
+                        category: 'breakfast',
+                        createdAt: new Date().toISOString()
+                    },
+                    {
+                        id: '4',
+                        title: 'Chocolate Lava Cake',
+                        slug: 'chocolate-lava-cake',
+                        imageUrl: 'https://images.unsplash.com/photo-1606313564200-e75d5e30476c?w=500',
+                        shortDesc: 'Decadent chocolate cake with a gooey molten center.',
+                        category: 'dessert',
                         createdAt: new Date().toISOString()
                     }
                 ]);
@@ -351,6 +362,7 @@ app.get('/api/articles', async (req, res) => {
                 slug: data.slug,
                 imageUrl: data.imageUrl,
                 shortDesc: data.shortDesc,
+                category: data.category || 'all',
                 createdAt: data.createdAt
             });
         });
@@ -378,7 +390,6 @@ app.get('/api/article/:slug', async (req, res) => {
                 if (article) return res.json(article);
             }
             
-            // Demo articles
             const demoArticles = {
                 'creamy-garlic-parmesan-pasta': {
                     id: '1',
@@ -386,7 +397,38 @@ app.get('/api/article/:slug', async (req, res) => {
                     slug: 'creamy-garlic-parmesan-pasta',
                     imageUrl: 'https://images.unsplash.com/photo-1645112411344-0f6e5e5b7f3e?w=800',
                     shortDesc: 'A rich and creamy pasta dish loaded with garlic and parmesan cheese.',
+                    category: 'dinner',
                     fullContent: 'This creamy garlic parmesan pasta is the ultimate comfort food.\n\nIngredients:\n- 8 oz pasta\n- 4 cloves garlic\n- 1 cup heavy cream\n- 1/2 cup parmesan cheese\n\nInstructions:\n1. Cook pasta\n2. Sauté garlic\n3. Add cream\n4. Stir in parmesan\n5. Serve!',
+                    createdAt: new Date().toISOString()
+                },
+                'homemade-margherita-pizza': {
+                    id: '2',
+                    title: 'Homemade Margherita Pizza',
+                    slug: 'homemade-margherita-pizza',
+                    imageUrl: 'https://images.unsplash.com/photo-1604382355076-af4b0eb60143?w=800',
+                    shortDesc: 'Classic Italian pizza with fresh basil, mozzarella, and tomato sauce.',
+                    category: 'lunch',
+                    fullContent: 'Nothing beats a homemade Margherita pizza.\n\nIngredients:\n- Pizza dough\n- San Marzano tomatoes\n- Fresh mozzarella\n- Fresh basil\n\nInstructions:\n1. Preheat oven to 500°F\n2. Stretch dough\n3. Add toppings\n4. Bake until bubbly',
+                    createdAt: new Date().toISOString()
+                },
+                'fluffy-pancakes': {
+                    id: '3',
+                    title: 'Fluffy Pancakes',
+                    slug: 'fluffy-pancakes',
+                    imageUrl: 'https://images.unsplash.com/photo-1575853121743-60c24f0a7502?w=800',
+                    shortDesc: 'Light and fluffy pancakes perfect for breakfast.',
+                    category: 'breakfast',
+                    fullContent: 'Start your day with these delicious fluffy pancakes.\n\nIngredients:\n- 1 cup flour\n- 2 tbsp sugar\n- 1 tsp baking powder\n- 1 cup milk\n- 1 egg\n\nInstructions:\n1. Mix dry ingredients\n2. Add wet ingredients\n3. Cook on griddle\n4. Serve with maple syrup',
+                    createdAt: new Date().toISOString()
+                },
+                'chocolate-lava-cake': {
+                    id: '4',
+                    title: 'Chocolate Lava Cake',
+                    slug: 'chocolate-lava-cake',
+                    imageUrl: 'https://images.unsplash.com/photo-1606313564200-e75d5e30476c?w=800',
+                    shortDesc: 'Decadent chocolate cake with a gooey molten center.',
+                    category: 'dessert',
+                    fullContent: 'The ultimate dessert for chocolate lovers.\n\nIngredients:\n- 4 oz dark chocolate\n- 1/2 cup butter\n- 2 eggs\n- 1/4 cup sugar\n- 2 tbsp flour\n\nInstructions:\n1. Melt chocolate and butter\n2. Whisk eggs and sugar\n3. Combine all ingredients\n4. Bake for 12 minutes\n5. Serve immediately',
                     createdAt: new Date().toISOString()
                 }
             };
@@ -508,7 +550,6 @@ app.post('/api/check-subscription', async (req, res) => {
             subscriber = { id: doc.id, ...doc.data() };
         });
         
-        // Lifetime subscription - only check isActive flag (no expiry date)
         const isActive = subscriber.isActive === true;
         
         res.json({ 
@@ -531,7 +572,6 @@ app.post('/api/ebooks', async (req, res) => {
         }
         
         if (!isFirebaseInitialized) {
-            // Check subscription first
             const subscribersRef = db.collection('subscribers');
             const subSnapshot = await subscribersRef.where('email', '==', email).limit(1).get();
             
@@ -572,7 +612,6 @@ app.post('/api/ebooks', async (req, res) => {
             return res.json(ebooks);
         }
         
-        // Check subscription first (lifetime)
         const subSnapshot = await db.collection('subscribers').where('email', '==', email).limit(1).get();
         if (subSnapshot.empty) {
             return res.status(403).json({ error: 'Subscription required' });
@@ -587,7 +626,6 @@ app.post('/api/ebooks', async (req, res) => {
             return res.status(403).json({ error: 'Active subscription required' });
         }
         
-        // Get ebooks
         const ebookSnapshot = await db.collection('ebooks').orderBy('createdAt', 'desc').get();
         const ebooks = [];
         ebookSnapshot.forEach(doc => {
@@ -615,7 +653,6 @@ app.post('/api/subscribe', async (req, res) => {
         }
         
         if (!isFirebaseInitialized) {
-            // Check if already exists
             const existing = await db.collection('subscribers').where('email', '==', email).get();
             if (!existing.empty) {
                 return res.json({ message: 'Email already registered' });
@@ -630,7 +667,6 @@ app.post('/api/subscribe', async (req, res) => {
             return res.json({ success: true, message: 'Subscribed successfully! Contact admin for premium activation.' });
         }
         
-        // Check if already exists
         const existing = await db.collection('subscribers').where('email', '==', email).get();
         if (!existing.empty) {
             return res.json({ message: 'Email already registered' });
@@ -740,10 +776,10 @@ app.get('/api/admin/ebooks', verifyAdmin, async (req, res) => {
     }
 });
 
-// Add article
+// Add article (WITH CATEGORY)
 app.post('/api/admin/articles', verifyAdmin, async (req, res) => {
     try {
-        const { title, slug, imageUrl, shortDesc, fullContent } = req.body;
+        const { title, slug, imageUrl, shortDesc, fullContent, category } = req.body;
         
         if (!title || !slug || !imageUrl || !shortDesc || !fullContent) {
             return res.status(400).json({ error: 'All fields required' });
@@ -755,6 +791,7 @@ app.post('/api/admin/articles', verifyAdmin, async (req, res) => {
             imageUrl,
             shortDesc,
             fullContent,
+            category: category || 'all',
             createdAt: new Date().toISOString()
         };
         
@@ -771,15 +808,16 @@ app.post('/api/admin/articles', verifyAdmin, async (req, res) => {
     }
 });
 
-// Update article
+// Update article (WITH CATEGORY)
 app.put('/api/admin/articles/:id', verifyAdmin, async (req, res) => {
     try {
         const { id } = req.params;
-        const { title, slug, imageUrl, shortDesc, fullContent } = req.body;
+        const { title, slug, imageUrl, shortDesc, fullContent, category } = req.body;
         
         if (!isFirebaseInitialized) {
             await db.collection('articles').doc(id).update({
                 title, slug, imageUrl, shortDesc, fullContent,
+                category: category || 'all',
                 updatedAt: new Date().toISOString()
             });
             return res.json({ success: true });
@@ -787,6 +825,7 @@ app.put('/api/admin/articles/:id', verifyAdmin, async (req, res) => {
         
         await db.collection('articles').doc(id).update({
             title, slug, imageUrl, shortDesc, fullContent,
+            category: category || 'all',
             updatedAt: new Date().toISOString()
         });
         
@@ -937,7 +976,6 @@ app.put('/api/admin/subscribers/:id', verifyAdmin, async (req, res) => {
         const { id } = req.params;
         const { isActive } = req.body;
         
-        // Only update isActive flag - no expiry date for lifetime subscription
         const updateData = { 
             isActive: isActive === true,
             updatedAt: new Date().toISOString()
