@@ -39,38 +39,53 @@ try {
     } else {
         console.log('⚠️ Firebase credentials missing, running in demo mode');
         // Demo data store (in-memory for testing)
+        const demoData = {
+            subscribers: [],
+            articles: [],
+            affiliateLinks: [],
+            ebooks: [],
+            users: []
+        };
+        
         db = {
             collection: (name) => ({
                 add: async (data) => {
                     console.log(`📝 Demo: Added to ${name}:`, data);
-                    return { id: Date.now().toString() };
+                    const id = Date.now().toString();
+                    if (!demoData[name]) demoData[name] = [];
+                    demoData[name].push({ id, ...data });
+                    return { id };
                 },
                 get: async () => ({
-                    empty: true,
-                    forEach: () => {},
-                    docs: []
+                    empty: demoData[name]?.length === 0,
+                    forEach: (callback) => demoData[name]?.forEach(doc => callback({ data: () => doc, id: doc.id })),
+                    docs: demoData[name]?.map(doc => ({ data: () => doc, id: doc.id })) || []
                 }),
-                where: () => ({
+                where: (field, op, value) => ({
                     limit: () => ({
                         get: async () => ({
-                            empty: true,
-                            forEach: () => {}
+                            empty: !demoData[name]?.some(d => d[field] === value),
+                            forEach: (callback) => demoData[name]?.filter(d => d[field] === value).forEach(doc => callback({ data: () => doc, id: doc.id }))
                         })
                     })
                 }),
                 doc: (id) => ({
                     update: async (data) => {
                         console.log(`📝 Demo: Updated ${name}/${id}:`, data);
+                        const index = demoData[name]?.findIndex(d => d.id === id);
+                        if (index !== -1) demoData[name][index] = { ...demoData[name][index], ...data };
                     },
                     delete: async () => {
                         console.log(`📝 Demo: Deleted ${name}/${id}`);
+                        const index = demoData[name]?.findIndex(d => d.id === id);
+                        if (index !== -1) demoData[name].splice(index, 1);
                     }
                 }),
                 orderBy: () => ({
                     get: async () => ({
-                        empty: true,
-                        forEach: () => {},
-                        docs: []
+                        empty: demoData[name]?.length === 0,
+                        forEach: (callback) => demoData[name]?.forEach(doc => callback({ data: () => doc, id: doc.id })),
+                        docs: demoData[name]?.map(doc => ({ data: () => doc, id: doc.id })) || []
                     })
                 })
             })
@@ -123,7 +138,7 @@ app.get('/api/health', (req, res) => {
     });
 });
 
-// USER SIGNUP - NEW ENDPOINT
+// USER SIGNUP
 app.post('/api/signup', async (req, res) => {
     try {
         const { name, email, password } = req.body;
@@ -137,12 +152,22 @@ app.post('/api/signup', async (req, res) => {
         }
         
         if (!isFirebaseInitialized) {
-            // Demo mode - store in memory/demo
-            console.log(`Demo: Creating user ${email}`);
+            // Demo mode
+            const hashedPassword = await bcrypt.hash(password, 10);
+            const usersRef = db.collection('users');
+            await usersRef.add({
+                name, email, password: hashedPassword,
+                createdAt: new Date().toISOString()
+            });
+            
+            await db.collection('subscribers').add({
+                email, name, isActive: false,
+                subscribedAt: new Date().toISOString()
+            });
+            
             return res.json({ 
                 success: true, 
-                message: 'Demo mode - Account created successfully! Please login.',
-                uid: 'demo-' + Date.now()
+                message: 'Demo mode - Account created successfully! Please login.'
             });
         }
         
@@ -163,7 +188,7 @@ app.post('/api/signup', async (req, res) => {
             displayName: name
         });
         
-        // Hash password for local storage (optional)
+        // Hash password for local storage
         const hashedPassword = await bcrypt.hash(password, 10);
         
         // Create user document in Firestore
@@ -175,14 +200,12 @@ app.post('/api/signup', async (req, res) => {
             uid: userRecord.uid
         });
         
-        // Auto-add to subscribers (inactive by default, admin can activate)
+        // Auto-add to subscribers (inactive by default)
         await db.collection('subscribers').add({
             email: email,
             name: name,
             isActive: false,
-            subscribedAt: new Date().toISOString(),
-            expiryDate: null,
-            uid: userRecord.uid
+            subscribedAt: new Date().toISOString()
         });
         
         console.log(`✅ User created: ${email} (${userRecord.uid})`);
@@ -199,7 +222,7 @@ app.post('/api/signup', async (req, res) => {
     }
 });
 
-// USER LOGIN - NEW ENDPOINT
+// USER LOGIN
 app.post('/api/login', async (req, res) => {
     try {
         const { email, password } = req.body;
@@ -209,17 +232,29 @@ app.post('/api/login', async (req, res) => {
         }
         
         if (!isFirebaseInitialized) {
-            // Demo mode - check demo credentials
-            const users = JSON.parse(global.demoUsers || '[]');
-            const user = users.find(u => u.email === email && u.password === password);
-            if (user) {
-                const token = jwt.sign({ email, name: user.name }, JWT_SECRET, { expiresIn: '7d' });
-                return res.json({ success: true, token, email, name: user.name });
-            } else if (email === 'demo@example.com' && password === 'demo123') {
-                const token = jwt.sign({ email, name: 'Demo User' }, JWT_SECRET, { expiresIn: '7d' });
-                return res.json({ success: true, token, email, name: 'Demo User' });
+            // Demo mode
+            const usersRef = db.collection('users');
+            const snapshot = await usersRef.where('email', '==', email).limit(1).get();
+            
+            if (snapshot.empty) {
+                return res.status(401).json({ error: 'Invalid email or password' });
             }
-            return res.status(401).json({ error: 'Invalid email or password' });
+            
+            let user = null;
+            let userId = null;
+            snapshot.forEach(doc => {
+                user = doc.data();
+                userId = doc.id;
+            });
+            
+            const isValid = await bcrypt.compare(password, user.password);
+            if (!isValid) {
+                return res.status(401).json({ error: 'Invalid email or password' });
+            }
+            
+            const token = jwt.sign({ email: user.email, name: user.name, uid: userId }, JWT_SECRET, { expiresIn: '7d' });
+            
+            return res.json({ success: true, token, email: user.email, name: user.name });
         }
         
         // Find user in Firestore
@@ -268,33 +303,41 @@ app.post('/api/login', async (req, res) => {
 app.get('/api/articles', async (req, res) => {
     try {
         if (!isFirebaseInitialized) {
-            // Return demo articles
-            return res.json([
-                {
-                    id: '1',
-                    title: 'Creamy Garlic Parmesan Pasta',
-                    slug: 'creamy-garlic-parmesan-pasta',
-                    imageUrl: 'https://images.unsplash.com/photo-1645112411344-0f6e5e5b7f3e?w=500',
-                    shortDesc: 'A rich and creamy pasta dish loaded with garlic and parmesan cheese.',
-                    createdAt: new Date().toISOString()
-                },
-                {
-                    id: '2',
-                    title: 'Homemade Margherita Pizza',
-                    slug: 'homemade-margherita-pizza',
-                    imageUrl: 'https://images.unsplash.com/photo-1604382355076-af4b0eb60143?w=500',
-                    shortDesc: 'Classic Italian pizza with fresh basil, mozzarella, and tomato sauce.',
-                    createdAt: new Date().toISOString()
-                },
-                {
-                    id: '3',
-                    title: 'Chocolate Lava Cake',
-                    slug: 'chocolate-lava-cake',
-                    imageUrl: 'https://images.unsplash.com/photo-1606313564200-e75d5e30476c?w=500',
-                    shortDesc: 'Decadent chocolate cake with a gooey molten center.',
-                    createdAt: new Date().toISOString()
-                }
-            ]);
+            const articlesRef = db.collection('articles');
+            const snapshot = await articlesRef.orderBy('createdAt', 'desc').get();
+            const articles = [];
+            snapshot.forEach(doc => {
+                const data = doc.data();
+                articles.push({
+                    id: doc.id,
+                    title: data.title,
+                    slug: data.slug,
+                    imageUrl: data.imageUrl,
+                    shortDesc: data.shortDesc,
+                    createdAt: data.createdAt
+                });
+            });
+            if (articles.length === 0) {
+                return res.json([
+                    {
+                        id: '1',
+                        title: 'Creamy Garlic Parmesan Pasta',
+                        slug: 'creamy-garlic-parmesan-pasta',
+                        imageUrl: 'https://images.unsplash.com/photo-1645112411344-0f6e5e5b7f3e?w=500',
+                        shortDesc: 'A rich and creamy pasta dish loaded with garlic and parmesan cheese.',
+                        createdAt: new Date().toISOString()
+                    },
+                    {
+                        id: '2',
+                        title: 'Homemade Margherita Pizza',
+                        slug: 'homemade-margherita-pizza',
+                        imageUrl: 'https://images.unsplash.com/photo-1604382355076-af4b0eb60143?w=500',
+                        shortDesc: 'Classic Italian pizza with fresh basil, mozzarella, and tomato sauce.',
+                        createdAt: new Date().toISOString()
+                    }
+                ]);
+            }
+            return res.json(articles);
         }
         
         const articlesRef = db.collection('articles');
@@ -324,6 +367,17 @@ app.get('/api/article/:slug', async (req, res) => {
         const slug = req.params.slug;
         
         if (!isFirebaseInitialized) {
+            const articlesRef = db.collection('articles');
+            const snapshot = await articlesRef.where('slug', '==', slug).limit(1).get();
+            
+            if (!snapshot.empty) {
+                let article = null;
+                snapshot.forEach(doc => {
+                    article = { id: doc.id, ...doc.data() };
+                });
+                if (article) return res.json(article);
+            }
+            
             // Demo articles
             const demoArticles = {
                 'creamy-garlic-parmesan-pasta': {
@@ -332,16 +386,7 @@ app.get('/api/article/:slug', async (req, res) => {
                     slug: 'creamy-garlic-parmesan-pasta',
                     imageUrl: 'https://images.unsplash.com/photo-1645112411344-0f6e5e5b7f3e?w=800',
                     shortDesc: 'A rich and creamy pasta dish loaded with garlic and parmesan cheese.',
-                    fullContent: 'This creamy garlic parmesan pasta is the ultimate comfort food. Made with simple ingredients, it comes together in just 20 minutes.\n\nIngredients:\n- 8 oz pasta\n- 4 cloves garlic\n- 1 cup heavy cream\n- 1/2 cup parmesan cheese\n\nInstructions:\n1. Cook pasta\n2. Sauté garlic\n3. Add cream\n4. Stir in parmesan\n5. Serve!',
-                    createdAt: new Date().toISOString()
-                },
-                'homemade-margherita-pizza': {
-                    id: '2',
-                    title: 'Homemade Margherita Pizza',
-                    slug: 'homemade-margherita-pizza',
-                    imageUrl: 'https://images.unsplash.com/photo-1604382355076-af4b0eb60143?w=800',
-                    shortDesc: 'Classic Italian pizza with fresh basil, mozzarella, and tomato sauce.',
-                    fullContent: 'Nothing beats a homemade Margherita pizza.\n\nIngredients:\n- Pizza dough\n- San Marzano tomatoes\n- Fresh mozzarella\n- Fresh basil\n\nInstructions:\n1. Preheat oven to 500°F\n2. Stretch dough\n3. Add toppings\n4. Bake until bubbly',
+                    fullContent: 'This creamy garlic parmesan pasta is the ultimate comfort food.\n\nIngredients:\n- 8 oz pasta\n- 4 cloves garlic\n- 1 cup heavy cream\n- 1/2 cup parmesan cheese\n\nInstructions:\n1. Cook pasta\n2. Sauté garlic\n3. Add cream\n4. Stir in parmesan\n5. Serve!',
                     createdAt: new Date().toISOString()
                 }
             };
@@ -375,24 +420,33 @@ app.get('/api/article/:slug', async (req, res) => {
 app.get('/api/products', async (req, res) => {
     try {
         if (!isFirebaseInitialized) {
-            return res.json([
-                {
-                    id: '1',
-                    name: 'Professional Chef Knife',
-                    imageUrl: 'https://images.unsplash.com/photo-1593615694814-d4f0b9d0e7b8?w=300',
-                    price: '$49.99',
-                    description: 'High-carbon stainless steel chef knife with ergonomic handle.',
-                    redirectUrl: 'https://amazon.com/demo'
-                },
-                {
-                    id: '2',
-                    name: 'Cast Iron Skillet',
-                    imageUrl: 'https://images.unsplash.com/photo-1584990347449-a85d9e7f9c0a?w=300',
-                    price: '$39.99',
-                    description: 'Pre-seasoned cast iron skillet for perfect searing.',
-                    redirectUrl: 'https://amazon.com/demo'
-                }
-            ]);
+            const productsRef = db.collection('affiliateLinks');
+            const snapshot = await productsRef.orderBy('createdAt', 'desc').get();
+            const products = [];
+            snapshot.forEach(doc => {
+                const data = doc.data();
+                products.push({
+                    id: doc.id,
+                    name: data.name,
+                    imageUrl: data.imageUrl,
+                    price: data.price,
+                    description: data.description,
+                    redirectUrl: data.redirectUrl
+                });
+            });
+            if (products.length === 0) {
+                return res.json([
+                    {
+                        id: '1',
+                        name: 'Professional Chef Knife',
+                        imageUrl: 'https://images.unsplash.com/photo-1593615694814-d4f0b9d0e7b8?w=300',
+                        price: '$49.99',
+                        description: 'High-carbon stainless steel chef knife with ergonomic handle.',
+                        redirectUrl: 'https://amazon.com/demo'
+                    }
+                ]);
+            }
+            return res.json(products);
         }
         
         const snapshot = await db.collection('affiliateLinks').orderBy('createdAt', 'desc').get();
@@ -415,7 +469,7 @@ app.get('/api/products', async (req, res) => {
     }
 });
 
-// Check subscription status
+// Check subscription status - LIFETIME (no expiry)
 app.post('/api/check-subscription', async (req, res) => {
     try {
         const { email } = req.body;
@@ -424,9 +478,21 @@ app.post('/api/check-subscription', async (req, res) => {
         }
         
         if (!isFirebaseInitialized) {
+            const subscribersRef = db.collection('subscribers');
+            const snapshot = await subscribersRef.where('email', '==', email).limit(1).get();
+            
+            if (snapshot.empty) {
+                return res.json({ isActive: false, isLifetime: false });
+            }
+            
+            let subscriber = null;
+            snapshot.forEach(doc => {
+                subscriber = { id: doc.id, ...doc.data() };
+            });
+            
             return res.json({ 
-                isActive: email === 'demo@example.com',
-                expiryDate: email === 'demo@example.com' ? new Date(Date.now() + 30*24*60*60*1000).toISOString() : null
+                isActive: subscriber.isActive === true,
+                isLifetime: true
             });
         }
         
@@ -434,7 +500,7 @@ app.post('/api/check-subscription', async (req, res) => {
         const snapshot = await subscriberRef.where('email', '==', email).limit(1).get();
         
         if (snapshot.empty) {
-            return res.json({ isActive: false });
+            return res.json({ isActive: false, isLifetime: false });
         }
         
         let subscriber = null;
@@ -442,15 +508,21 @@ app.post('/api/check-subscription', async (req, res) => {
             subscriber = { id: doc.id, ...doc.data() };
         });
         
-        const isActive = subscriber.isActive && new Date(subscriber.expiryDate) > new Date();
-        res.json({ isActive, expiryDate: subscriber.expiryDate });
+        // Lifetime subscription - only check isActive flag (no expiry date)
+        const isActive = subscriber.isActive === true;
+        
+        res.json({ 
+            isActive: isActive,
+            isLifetime: true,
+            message: isActive ? "Active lifetime subscription" : "No active subscription"
+        });
     } catch (error) {
         console.error('Error checking subscription:', error);
         res.status(500).json({ error: error.message });
     }
 });
 
-// Get ebooks (requires subscription)
+// Get ebooks (requires active subscription)
 app.post('/api/ebooks', async (req, res) => {
     try {
         const { email } = req.body;
@@ -459,7 +531,35 @@ app.post('/api/ebooks', async (req, res) => {
         }
         
         if (!isFirebaseInitialized) {
-            if (email === 'demo@example.com') {
+            // Check subscription first
+            const subscribersRef = db.collection('subscribers');
+            const subSnapshot = await subscribersRef.where('email', '==', email).limit(1).get();
+            
+            let isActive = false;
+            if (!subSnapshot.empty) {
+                subSnapshot.forEach(doc => {
+                    isActive = doc.data().isActive === true;
+                });
+            }
+            
+            if (!isActive && email !== 'demo@example.com') {
+                return res.status(403).json({ error: 'Active subscription required' });
+            }
+            
+            const ebooksRef = db.collection('ebooks');
+            const ebookSnapshot = await ebooksRef.orderBy('createdAt', 'desc').get();
+            const ebooks = [];
+            ebookSnapshot.forEach(doc => {
+                const data = doc.data();
+                ebooks.push({
+                    id: doc.id,
+                    name: data.name,
+                    imageUrl: data.imageUrl,
+                    pdfUrl: data.pdfUrl
+                });
+            });
+            
+            if (ebooks.length === 0) {
                 return res.json([
                     {
                         id: '1',
@@ -468,12 +568,11 @@ app.post('/api/ebooks', async (req, res) => {
                         pdfUrl: '#'
                     }
                 ]);
-            } else {
-                return res.status(403).json({ error: 'Active subscription required' });
             }
+            return res.json(ebooks);
         }
         
-        // Check subscription first
+        // Check subscription first (lifetime)
         const subSnapshot = await db.collection('subscribers').where('email', '==', email).limit(1).get();
         if (subSnapshot.empty) {
             return res.status(403).json({ error: 'Subscription required' });
@@ -484,7 +583,7 @@ app.post('/api/ebooks', async (req, res) => {
             subscriber = { id: doc.id, ...doc.data() };
         });
         
-        if (!subscriber.isActive || new Date(subscriber.expiryDate) < new Date()) {
+        if (!subscriber.isActive) {
             return res.status(403).json({ error: 'Active subscription required' });
         }
         
@@ -507,7 +606,7 @@ app.post('/api/ebooks', async (req, res) => {
     }
 });
 
-// Subscribe user (newsletter)
+// Subscribe user (newsletter - not premium)
 app.post('/api/subscribe', async (req, res) => {
     try {
         const { email } = req.body;
@@ -516,8 +615,19 @@ app.post('/api/subscribe', async (req, res) => {
         }
         
         if (!isFirebaseInitialized) {
-            console.log(`Demo: Subscribed ${email}`);
-            return res.json({ success: true, message: 'Subscribed successfully! Contact admin for activation.' });
+            // Check if already exists
+            const existing = await db.collection('subscribers').where('email', '==', email).get();
+            if (!existing.empty) {
+                return res.json({ message: 'Email already registered' });
+            }
+            
+            await db.collection('subscribers').add({
+                email: email,
+                isActive: false,
+                subscribedAt: new Date().toISOString()
+            });
+            
+            return res.json({ success: true, message: 'Subscribed successfully! Contact admin for premium activation.' });
         }
         
         // Check if already exists
@@ -529,11 +639,10 @@ app.post('/api/subscribe', async (req, res) => {
         await db.collection('subscribers').add({
             email: email,
             isActive: false,
-            subscribedAt: new Date().toISOString(),
-            expiryDate: null
+            subscribedAt: new Date().toISOString()
         });
         
-        res.json({ success: true, message: 'Subscribed successfully! Contact admin for activation.' });
+        res.json({ success: true, message: 'Subscribed successfully! Contact admin for premium activation.' });
     } catch (error) {
         console.error('Error subscribing:', error);
         res.status(500).json({ error: error.message });
@@ -592,6 +701,45 @@ app.get('/api/admin/verify', verifyAdmin, async (req, res) => {
     res.json({ valid: true, email: req.admin.email });
 });
 
+// Get all ebooks (admin)
+app.get('/api/admin/ebooks', verifyAdmin, async (req, res) => {
+    try {
+        if (!isFirebaseInitialized) {
+            const ebooksRef = db.collection('ebooks');
+            const snapshot = await ebooksRef.orderBy('createdAt', 'desc').get();
+            const ebooks = [];
+            snapshot.forEach(doc => {
+                const data = doc.data();
+                ebooks.push({
+                    id: doc.id,
+                    name: data.name,
+                    imageUrl: data.imageUrl,
+                    pdfUrl: data.pdfUrl,
+                    createdAt: data.createdAt
+                });
+            });
+            return res.json(ebooks);
+        }
+        
+        const snapshot = await db.collection('ebooks').orderBy('createdAt', 'desc').get();
+        const ebooks = [];
+        snapshot.forEach(doc => {
+            const data = doc.data();
+            ebooks.push({
+                id: doc.id,
+                name: data.name,
+                imageUrl: data.imageUrl,
+                pdfUrl: data.pdfUrl,
+                createdAt: data.createdAt
+            });
+        });
+        res.json(ebooks);
+    } catch (error) {
+        console.error('Error fetching ebooks:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Add article
 app.post('/api/admin/articles', verifyAdmin, async (req, res) => {
     try {
@@ -611,8 +759,8 @@ app.post('/api/admin/articles', verifyAdmin, async (req, res) => {
         };
         
         if (!isFirebaseInitialized) {
-            console.log('Demo: Article added:', article);
-            return res.json({ id: Date.now().toString(), ...article });
+            const docRef = await db.collection('articles').add(article);
+            return res.json({ id: docRef.id, ...article });
         }
         
         const docRef = await db.collection('articles').add(article);
@@ -630,7 +778,10 @@ app.put('/api/admin/articles/:id', verifyAdmin, async (req, res) => {
         const { title, slug, imageUrl, shortDesc, fullContent } = req.body;
         
         if (!isFirebaseInitialized) {
-            console.log('Demo: Article updated:', { id, title, slug });
+            await db.collection('articles').doc(id).update({
+                title, slug, imageUrl, shortDesc, fullContent,
+                updatedAt: new Date().toISOString()
+            });
             return res.json({ success: true });
         }
         
@@ -652,7 +803,7 @@ app.delete('/api/admin/articles/:id', verifyAdmin, async (req, res) => {
         const { id } = req.params;
         
         if (!isFirebaseInitialized) {
-            console.log('Demo: Article deleted:', id);
+            await db.collection('articles').doc(id).delete();
             return res.json({ success: true });
         }
         
@@ -669,6 +820,10 @@ app.post('/api/admin/ebooks', verifyAdmin, async (req, res) => {
     try {
         const { name, imageUrl, pdfUrl } = req.body;
         
+        if (!name || !imageUrl || !pdfUrl) {
+            return res.status(400).json({ error: 'All fields required' });
+        }
+        
         const ebook = {
             name,
             imageUrl,
@@ -677,8 +832,8 @@ app.post('/api/admin/ebooks', verifyAdmin, async (req, res) => {
         };
         
         if (!isFirebaseInitialized) {
-            console.log('Demo: Ebook added:', ebook);
-            return res.json({ id: Date.now().toString(), ...ebook });
+            const docRef = await db.collection('ebooks').add(ebook);
+            return res.json({ id: docRef.id, ...ebook });
         }
         
         const docRef = await db.collection('ebooks').add(ebook);
@@ -695,7 +850,7 @@ app.delete('/api/admin/ebooks/:id', verifyAdmin, async (req, res) => {
         const { id } = req.params;
         
         if (!isFirebaseInitialized) {
-            console.log('Demo: Ebook deleted:', id);
+            await db.collection('ebooks').doc(id).delete();
             return res.json({ success: true });
         }
         
@@ -722,8 +877,8 @@ app.post('/api/admin/products', verifyAdmin, async (req, res) => {
         };
         
         if (!isFirebaseInitialized) {
-            console.log('Demo: Product added:', product);
-            return res.json({ id: Date.now().toString(), ...product });
+            const docRef = await db.collection('affiliateLinks').add(product);
+            return res.json({ id: docRef.id, ...product });
         }
         
         const docRef = await db.collection('affiliateLinks').add(product);
@@ -740,7 +895,7 @@ app.delete('/api/admin/products/:id', verifyAdmin, async (req, res) => {
         const { id } = req.params;
         
         if (!isFirebaseInitialized) {
-            console.log('Demo: Product deleted:', id);
+            await db.collection('affiliateLinks').doc(id).delete();
             return res.json({ success: true });
         }
         
@@ -756,9 +911,12 @@ app.delete('/api/admin/products/:id', verifyAdmin, async (req, res) => {
 app.get('/api/admin/subscribers', verifyAdmin, async (req, res) => {
     try {
         if (!isFirebaseInitialized) {
-            return res.json([
-                { id: '1', email: 'demo@example.com', isActive: true, subscribedAt: new Date().toISOString(), expiryDate: new Date(Date.now() + 30*24*60*60*1000).toISOString() }
-            ]);
+            const snapshot = await db.collection('subscribers').orderBy('subscribedAt', 'desc').get();
+            const subscribers = [];
+            snapshot.forEach(doc => {
+                subscribers.push({ id: doc.id, ...doc.data() });
+            });
+            return res.json(subscribers);
         }
         
         const snapshot = await db.collection('subscribers').orderBy('subscribedAt', 'desc').get();
@@ -773,21 +931,20 @@ app.get('/api/admin/subscribers', verifyAdmin, async (req, res) => {
     }
 });
 
-// Update subscriber status
+// Update subscriber status - LIFETIME (no expiry date)
 app.put('/api/admin/subscribers/:id', verifyAdmin, async (req, res) => {
     try {
         const { id } = req.params;
-        const { isActive, expiryDate } = req.body;
-        const updateData = { isActive };
+        const { isActive } = req.body;
         
-        if (isActive && expiryDate) {
-            updateData.expiryDate = expiryDate;
-        } else if (!isActive) {
-            updateData.expiryDate = null;
-        }
+        // Only update isActive flag - no expiry date for lifetime subscription
+        const updateData = { 
+            isActive: isActive === true,
+            updatedAt: new Date().toISOString()
+        };
         
         if (!isFirebaseInitialized) {
-            console.log('Demo: Subscriber updated:', { id, updateData });
+            await db.collection('subscribers').doc(id).update(updateData);
             return res.json({ success: true });
         }
         
@@ -805,7 +962,7 @@ app.delete('/api/admin/subscribers/:id', verifyAdmin, async (req, res) => {
         const { id } = req.params;
         
         if (!isFirebaseInitialized) {
-            console.log('Demo: Subscriber deleted:', id);
+            await db.collection('subscribers').doc(id).delete();
             return res.json({ success: true });
         }
         
@@ -836,6 +993,7 @@ app.all('/api/*', (req, res) => {
             'POST /api/ebooks',
             'POST /api/subscribe',
             'GET /api/admin/verify',
+            'GET /api/admin/ebooks',
             'GET /api/admin/subscribers',
             'POST /api/admin/articles',
             'PUT /api/admin/articles/:id',
