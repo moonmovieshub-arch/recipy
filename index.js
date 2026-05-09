@@ -1,7 +1,6 @@
 const express = require('express');
 const admin = require('firebase-admin');
 const cors = require('cors');
-const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 
 const app = express();
@@ -389,7 +388,7 @@ app.post('/api/subscribe', async (req, res) => {
     }
 });
 
-// ============ ADMIN LOGIN ROUTE (MOST IMPORTANT) ============
+// ============ ADMIN LOGIN ROUTE (PLAIN PASSWORD VERSION) ============
 app.post('/api/admin/login', async (req, res) => {
     try {
         const { email, password } = req.body;
@@ -402,15 +401,16 @@ app.post('/api/admin/login', async (req, res) => {
             return res.status(401).json({ error: 'Invalid email or password' });
         }
         
-        // Check password
-        const adminPasswordHash = process.env.ADMIN_PASSWORD_HASH;
+        // DIRECT PLAIN PASSWORD COMPARISON (NO HASH)
+        const adminPassword = process.env.ADMIN_PASSWORD;
         
-        if (!adminPasswordHash) {
-            console.log('Admin login failed: No password hash in environment');
-            return res.status(500).json({ error: 'Server configuration error' });
+        if (!adminPassword) {
+            console.log('Admin login failed: No ADMIN_PASSWORD in environment');
+            return res.status(500).json({ error: 'Server configuration error - Missing password' });
         }
         
-        const isValid = await bcrypt.compare(password, adminPasswordHash);
+        // Simple string comparison
+        const isValid = (password === adminPassword);
         
         if (!isValid) {
             console.log('Admin login failed: Invalid password');
